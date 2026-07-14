@@ -1,6 +1,6 @@
 import streamlit as st
 import html as html_lib
-import ollama, hashlib, time, re, unicodedata, ftfy, os, psycopg2
+import requests, hashlib, hmac, time, re, unicodedata, ftfy, os, psycopg2
 from difflib import SequenceMatcher
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
@@ -138,9 +138,18 @@ def set_page(page):
     st.query_params["page"] = page
     st.rerun()
 
-# Hash user password
-def hash_word(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+# Hash user password with PBKDF2 and a per-user salt, stored as "salt$digest"
+def hash_word(password, salt=None):
+    if salt is None:
+        salt = os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), bytes.fromhex(salt), 100_000
+    ).hex()
+    return f"{salt}${digest}"
+
+def verify_password(password, stored):
+    salt = stored.split("$", 1)[0]
+    return hmac.compare_digest(hash_word(password, salt), stored)
 
 # Add user client_id and password to database
 def add_user(client_id, user_type, password):
@@ -163,25 +172,23 @@ def add_user(client_id, user_type, password):
 def search_user(client_id, password):
     con = get_connection()
     cur = con.cursor()
-    hash_password = hash_word(password)
     cur.execute(
-        "SELECT type FROM account WHERE client_id = %s AND password = %s",
-        (client_id, hash_password)
+        "SELECT type, password FROM account WHERE client_id = %s",
+        (client_id,)
     )
     row = cur.fetchone()
     con.close()
-    if not row:
+    if not row or not verify_password(password, row["password"]):
         return None
-    # Handle both dict‐ and tuple‐style cursors
-    if isinstance(row, dict):
-        return row.get("type")
-    return row[0]
+    return row["type"]
 
 # Logout user session and redirect to login page
 def logout_user():
     st.session_state['auth_stat'] = None
     st.session_state['client_id'] = None
+    st.session_state['name'] = None
     st.session_state['type'] = None
+    st.session_state['complaints_checked'] = False
     st.session_state['corrected_text'] = None
     st.session_state['rendered_html'] = None
     st.session_state['can_download'] = None
@@ -493,16 +500,23 @@ def correct_text(user_input, self_correction=False):
             '''
 
         # Generate response
-        resp = ollama.generate(
-            model="mistral",
-            prompt=f"{LLM_instruction}\n\nInput: {user_input}\n\nOutput:",
-            options={
+        resp = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {os.getenv('MISTRAL_API_KEY')}"},
+            json={
+                "model": "mistral-small-latest",
+                "messages": [
+                    {"role": "system", "content": LLM_instruction},
+                    {"role": "user", "content": f"Input: {user_input}\n\nOutput:"}
+                ],
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "max_tokens": 1024
-            }
+            },
+            timeout=60
         )
-        output = resp['response'].strip()
+        resp.raise_for_status()
+        output = resp.json()["choices"][0]["message"]["content"].strip()
 
         # Paid‐user token accounting & history
         if st.session_state['type'] == 'P':

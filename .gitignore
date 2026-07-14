@@ -184,5 +184,8 @@ streamlit_html_viewer/frontend/build/
 **/node_modules/
 **/build/
 
+# ...but the component's production build must be committed for deployment
+!streamlit_html_viewer/streamlit_html_viewer/frontend/build/
+
 # Cookiecutter templates cache (optional)
 # ~/.cookiecutters/

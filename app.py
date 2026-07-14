@@ -1,6 +1,8 @@
 ﻿from streamlit_html_viewer.streamlit_html_viewer import streamlit_html_viewer as html_viewer
 from utils import *
 import streamlit as st
+import streamlit.components.v1 as components
+import json
 
 st.set_page_config(page_title="LLM-Based Text Editor")
 
@@ -45,6 +47,9 @@ page = get_page()
 if page == "login":
     st.title("Login")
 
+    if st.session_state.pop("signup_success", False):
+        st.success("Signup successful! Please log in.")
+
     with st.form("login_form"):
         name = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -53,6 +58,7 @@ if page == "login":
         submitted_signup = st.form_submit_button("Create A New Account")
     
     if submitted_login:
+        name = name.strip()
         user_type = search_user(name, password)
         if user_type:
             # ban free users by IP or by name if no IP
@@ -92,7 +98,8 @@ elif page == "signup":
         submitted_login  = st.form_submit_button("Login Instead")
 
     if submitted_signup:
-        if not name or not password or not confirm:
+        name = name.strip()
+        if not name or not password.strip() or not confirm:
             st.error("Please fill in all fields")
         elif password != confirm:
             st.error("Passwords do not match")
@@ -101,7 +108,7 @@ elif page == "signup":
                 st.error("You cannot create a new free account yet. Try again later.")
                 st.stop()
             if add_user(name, 'F', password):
-                st.success("Signup successful! Redirecting to login...")
+                st.session_state['signup_success'] = True
                 st.session_state['auth_stat'] = None
                 set_page("login")
             else:
@@ -291,10 +298,6 @@ elif page == "collab":
     
     # boost the max-width of the main content only on this page
     st.markdown("""<style> .block-container {max-width: 1600px;} </style>""", unsafe_allow_html=True)
-    file_id       = st.session_state.get("current_file")
-    orig_key      = f"collab_orig_{file_id}"
-    rendered_key  = f"collab_html_{file_id}"
-    clean_key     = f"collab_clean_{file_id}"
 
     st.header("🤝 Collaborative Editor")
 
@@ -306,18 +309,24 @@ elif page == "collab":
             set_page("main")
         st.stop()
 
-    orig_key = f"collab_orig_{file_id}"
-    orig     = st.session_state.get(orig_key)
+    orig_key      = f"collab_orig_{file_id}"
+    rendered_key  = f"collab_html_{file_id}"
+    clean_key     = f"collab_clean_{file_id}"
+
+    orig = st.session_state.get(orig_key)
     if orig is None:
         orig = get_file_content(file_id)
+
+    if st.session_state.pop("collab_saved", False):
+        st.success("💾 Agreed text saved. All collaborators now see this version.")
 
     left, right = st.columns(2)
 
     with left:
         st.subheader("🖋️ Original")
         new_orig = st.text_area(
-            label="", value=orig, 
-            height=400, key="collab_edit",
+            label="", value=orig,
+            height=400, key=f"collab_edit_{file_id}",
             label_visibility="collapsed",
             placeholder=""
         )
@@ -335,6 +344,21 @@ elif page == "collab":
         edited    = html_viewer(html=wrapped, height=400)
         if edited is not None:
             st.session_state[clean_key] = edited
+
+        if st.button("💾 Save Agreed Text"):
+            agreed = st.session_state.get(clean_key)
+            if agreed:
+                clean = html_to_clean_text(agreed)
+                update_file_content(file_id, clean)
+                # next load of this page (any collaborator) starts from the saved version
+                st.session_state[orig_key] = clean
+                st.session_state.pop(rendered_key, None)
+                st.session_state.pop(clean_key, None)
+                st.session_state.pop(f"collab_edit_{file_id}", None)
+                st.session_state["collab_saved"] = True
+                st.rerun()
+            else:
+                st.warning("Nothing to save yet — submit the text for correction first.")
 
     if st.session_state['type'] == 'P':
         st.markdown("---")
@@ -362,11 +386,33 @@ elif page == "main":
         set_page("login")
     else:
         if st.session_state['type'] == 'P':
+            # Let the sidebar shrink below Streamlit's default minimum; once it
+            # gets narrow, hide the widget labels and keep only their icons.
+            st.markdown("""
+                <style>
+                  section[data-testid="stSidebar"] {
+                      min-width: 130px !important;
+                      container-type: inline-size;
+                  }
+                  [data-testid="stExpander"] summary [data-testid="stMarkdownContainer"] p {
+                      white-space: nowrap;
+                      overflow: hidden;
+                      text-overflow: ellipsis;
+                  }
+                  /* hide labels before they start wrapping */
+                  @container (max-width: 260px) {
+                    .st-key-sidebar_logout [data-testid="stMarkdownContainer"],
+                    [data-testid="stExpander"] summary [data-testid="stMarkdownContainer"] {
+                        display: none;
+                    }
+                  }
+                </style>
+            """, unsafe_allow_html=True)
             with st.sidebar:
-                if st.button("Logout", key="sidebar_logout"):
+                if st.button("Logout", icon="🚪", key="sidebar_logout"):
                     logout_user()
             # show invites only to paid users
-            with st.sidebar.expander("🔔 Notifications", expanded=False):
+            with st.sidebar.expander("Notifications", icon="🔔", expanded=False):
                 invites = list_invites_for(st.session_state['name'])
                 if not invites:
                     st.write("No new invites.")
@@ -387,7 +433,7 @@ elif page == "main":
                                 respond_invite(inv['invite_id'], False)
                                 st.rerun()
         
-            with st.sidebar.expander("📁 Shared Documents", expanded=False):
+            with st.sidebar.expander("Shared Documents", icon="📁", expanded=False):
                 files = list_files_for(st.session_state['name'])
                 if not files:
                     st.write("No documents yet.")
@@ -418,6 +464,7 @@ elif page == "main":
 
         if st.session_state['type'] == 'P':
             with st.expander("View/Add Tokens", expanded = True):
+                st.caption("ℹ️ For demo purposes, paid users can simply add tokens to their account for free, as per the requirements of the original assignment.")
                 show_paid_user_metrics(st.session_state['client_id'])
                 token_input = st.number_input("Enter Tokens", min_value=1, step=1)
                 
@@ -463,16 +510,48 @@ elif page == "main":
             user_input = (typed_input or file_text).rstrip()
 
             word_count = len(user_input.split())
-            if st.session_state['type'] == 'F' and word_count > 20:
-                st.markdown(f"<span style='color:red;'>Word count: {word_count} (Limit: 20. Submitting will result in a 3 minute timeout.)</span>", unsafe_allow_html=True)
-            elif st.session_state['type'] == 'P':
+            available = None
+            if st.session_state['type'] == 'P':
                 available, _ = get_token(st.session_state['client_id'])
-                if word_count > available:
-                    st.markdown(f"<span style='color:red;'>Word count: {word_count} (Exceeds available tokens: {available}. Submitting will cut your tokens in half.)</span>", unsafe_allow_html=True)
-                else:
-                    st.write(f"Word count: {word_count}")
+
+            if st.session_state['type'] == 'F' and word_count > 20:
+                counter_html = f"<span style='color:red;'>Word count: {word_count} (Limit: 20. Submitting will result in a 3 minute timeout.)</span>"
+            elif available is not None and word_count > available:
+                counter_html = f"<span style='color:red;'>Word count: {word_count} (Exceeds available tokens: {available}. Submitting will cut your tokens in half.)</span>"
             else:
-                st.write(f"Word count: {word_count}")
+                counter_html = f"Word count: {word_count}"
+            st.markdown(f"<div id='live-word-count'>{counter_html}</div>", unsafe_allow_html=True)
+
+            # Live-update the counter on each keystroke, client-side only.
+            # Python re-renders the same element on rerun, so both stay consistent.
+            if st.session_state['uploaded_file'] is None:
+                components.html(f"""
+                    <script>
+                    const USER_TYPE = {json.dumps(st.session_state['type'])};
+                    const AVAILABLE = {json.dumps(available)};
+                    function attach() {{
+                        const doc = window.parent.document;
+                        const ta = doc.querySelector('textarea[placeholder="Start typing here..."]');
+                        const counter = doc.getElementById('live-word-count');
+                        if (!ta || !counter) {{ setTimeout(attach, 200); return; }}
+                        ta.addEventListener('input', () => {{
+                            const t = ta.value.trim();
+                            const n = t ? t.split(/\\s+/).length : 0;
+                            if (USER_TYPE === 'F' && n > 20) {{
+                                counter.innerHTML = "<span style='color:red;'>Word count: " + n +
+                                    " (Limit: 20. Submitting will result in a 3 minute timeout.)</span>";
+                            }} else if (AVAILABLE !== null && n > AVAILABLE) {{
+                                counter.innerHTML = "<span style='color:red;'>Word count: " + n +
+                                    " (Exceeds available tokens: " + AVAILABLE +
+                                    ". Submitting will cut your tokens in half.)</span>";
+                            }} else {{
+                                counter.innerHTML = "Word count: " + n;
+                            }}
+                        }});
+                    }}
+                    attach();
+                    </script>
+                """, height=1)  # height 0 keeps the iframe unmounted (lazy-loading), so the script never runs
 
             correction_type = "LLM Correction"
             if st.session_state['type'] == 'P':
@@ -623,6 +702,8 @@ elif page == "main":
                 edited  = html_viewer(html=wrapped, height=255)
                 if edited is not None:
                     st.session_state["corrected_text"] = edited
+                if st.session_state['type'] == 'F':
+                    st.info("💡 Sign up as a paid user to download your corrected text, invite collaborators, and unlock more features.")
 
             if st.session_state['type'] == 'P':
                 if st.session_state.get("corrected_text") and not st.session_state.get("can_download"):
