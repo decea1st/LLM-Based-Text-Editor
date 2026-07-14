@@ -1,5 +1,7 @@
 # LLM-Based Text Editor
 
+**[Live demo](https://llm-text-editor.onrender.com/)** (first visit may take a minute while the free-tier host wakes up)
+
 A web app for grammar correction powered by a large language model. Users submit text, review highlighted corrections, and refine the result, with a token-based economy and collaborative editing built on top.
 
 ## Features
