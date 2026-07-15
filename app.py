@@ -523,33 +523,68 @@ elif page == "main":
             st.markdown(f"<div id='live-word-count'>{counter_html}</div>", unsafe_allow_html=True)
 
             # Live-update the counter on each keystroke, client-side only.
-            # Python re-renders the same element on rerun, so both stay consistent.
+            # The script never modifies Streamlit's (React-managed) nodes: it keeps its
+            # own overlay element and only toggles the server counter's visibility.
+            # Mutating React's DOM (e.g. innerHTML on #live-word-count) crashes React
+            # with removeChild errors on the next rerun.
             if st.session_state['uploaded_file'] is None:
                 components.html(f"""
                     <script>
                     const USER_TYPE = {json.dumps(st.session_state['type'])};
                     const AVAILABLE = {json.dumps(available)};
-                    function attach() {{
-                        const doc = window.parent.document;
-                        const ta = doc.querySelector('textarea[placeholder="Start typing here..."]');
-                        const counter = doc.getElementById('live-word-count');
-                        if (!ta || !counter) {{ setTimeout(attach, 200); return; }}
-                        ta.addEventListener('input', () => {{
-                            const t = ta.value.trim();
-                            const n = t ? t.split(/\\s+/).length : 0;
-                            if (USER_TYPE === 'F' && n > 20) {{
-                                counter.innerHTML = "<span style='color:red;'>Word count: " + n +
-                                    " (Limit: 20. Submitting will result in a 3 minute timeout.)</span>";
-                            }} else if (AVAILABLE !== null && n > AVAILABLE) {{
-                                counter.innerHTML = "<span style='color:red;'>Word count: " + n +
-                                    " (Exceeds available tokens: " + AVAILABLE +
-                                    ". Submitting will cut your tokens in half.)</span>";
-                            }} else {{
-                                counter.innerHTML = "Word count: " + n;
-                            }}
-                        }});
+                    const doc = window.parent.document;
+
+                    function markup(n) {{
+                        if (USER_TYPE === 'F' && n > 20) {{
+                            return "<span style='color:red;'>Word count: " + n +
+                                " (Limit: 20. Submitting will result in a 3 minute timeout.)</span>";
+                        }}
+                        if (AVAILABLE !== null && n > AVAILABLE) {{
+                            return "<span style='color:red;'>Word count: " + n +
+                                " (Exceeds available tokens: " + AVAILABLE +
+                                ". Submitting will cut your tokens in half.)</span>";
+                        }}
+                        return "Word count: " + n;
                     }}
-                    attach();
+
+                    // Keep our own element next to the server-rendered counter; hide the
+                    // server one. Re-runs safely after every Streamlit rerender.
+                    function sync(copyFromServer) {{
+                        const counter = doc.getElementById('live-word-count');
+                        if (!counter) return null;
+                        let live = doc.getElementById('live-word-count-live');
+                        if (!live || !live.isConnected || live.previousElementSibling !== counter) {{
+                            if (live) live.remove();
+                            live = doc.createElement('div');
+                            live.id = 'live-word-count-live';
+                            counter.after(live);
+                        }}
+                        if (counter.style.display !== 'none') counter.style.display = 'none';
+                        if (copyFromServer && live.dataset.src !== counter.textContent) {{
+                            live.innerHTML = counter.innerHTML;
+                            live.dataset.src = counter.textContent;
+                        }}
+                        return live;
+                    }}
+
+                    // Delegated listener survives Streamlit replacing the textarea node.
+                    doc.addEventListener('input', (e) => {{
+                        const t = e.target;
+                        if (!t || t.tagName !== 'TEXTAREA' ||
+                            t.getAttribute('placeholder') !== 'Start typing here...') return;
+                        const live = sync(false);
+                        if (!live) return;
+                        const text = t.value.trim();
+                        const n = text ? text.split(/\\s+/).length : 0;
+                        live.innerHTML = markup(n);
+                        live.dataset.src = live.textContent;
+                    }}, true);
+
+                    // After a rerun the server counter is the source of truth again.
+                    new MutationObserver(() => sync(true)).observe(
+                        doc.body, {{ childList: true, subtree: true }}
+                    );
+                    sync(true);
                     </script>
                 """, height=1)  # height 0 keeps the iframe unmounted (lazy-loading), so the script never runs
 
